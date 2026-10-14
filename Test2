@@ -1,0 +1,274 @@
+REPORT zminesweeper.
+
+*----------------------------------------------------------------------*
+* Data Types & Global Variables (Explicitly Declared for Older Syntax)
+*----------------------------------------------------------------------*
+TYPES: BEGIN OF ty_cell,
+         row_id TYPE i,
+         c1     TYPE string, c2 TYPE string, c3 TYPE string, c4 TYPE string,
+         c5     TYPE string, c6 TYPE string, c7 TYPE string, c8 TYPE string,
+       END OF ty_cell.
+
+DATA: gt_display_board TYPE STANDARD TABLE OF ty_cell,
+      gt_logic_board   TYPE STANDARD TABLE OF ty_cell,
+      gv_mines_count   TYPE i VALUE 10,
+      gv_game_over     TYPE c LENGTH 1,
+      gv_dim           TYPE i VALUE 8. " 8x8 Grid
+
+" ALV Grid Display Objects
+DATA: go_grid      TYPE REF TO cl_gui_alv_grid,
+      gt_fieldcat  TYPE lvc_t_fcat,
+      gs_layout    TYPE lvc_s_layo.
+
+*----------------------------------------------------------------------*
+* Local Event Handler Class Definition
+*----------------------------------------------------------------------*
+CLASS lcl_event_handler DEFINITION.
+  PUBLIC SECTION.
+    METHODS: handle_hotspot_click
+      FOR EVENT hotspot_click OF cl_gui_alv_grid
+      IMPORTING e_row_id e_column_id.
+ENDCLASS.
+
+DATA: go_handler TYPE REF TO lcl_event_handler.
+
+*----------------------------------------------------------------------*
+* START-OF-SELECTION (Main Program Entry)
+*----------------------------------------------------------------------*
+START-OF-SELECTION.
+  PERFORM initialize_boards.
+  PERFORM place_random_mines.
+  PERFORM calculate_numbers.
+  CALL SCREEN 0100.
+
+*----------------------------------------------------------------------*
+* Screen PBO Module
+*----------------------------------------------------------------------*
+MODULE status_0100 OUTPUT.
+  SET PF-STATUS 'SPACE'. 
+  IF go_grid IS INITIAL.
+    PERFORM build_field_catalog.
+    
+    " Uses the fallback full-screen framework bypassing layout canvas
+    CREATE OBJECT go_grid EXPORTING i_parent = cl_gui_container=>screen0.
+    
+    CREATE OBJECT go_handler.
+    SET HANDLER go_handler->handle_hotspot_click FOR go_grid.
+
+    gs_layout-cwidth_opt = 'X'.
+    gs_layout-no_headers = 'X'.
+
+    CALL METHOD go_grid->set_table_for_first_display
+      EXPORTING
+        is_layout       = gs_layout
+      CHANGING
+        it_outtab       = gt_display_board
+        it_fieldcatalog = gt_fieldcat.
+  ENDIF.
+ENDMODULE.
+
+*----------------------------------------------------------------------*
+* Screen PAI Module
+*----------------------------------------------------------------------*
+MODULE user_command_0100 INPUT.
+  IF sy-ucomm = 'BACK' OR sy-ucomm = 'EXIT'.
+    LEAVE PROGRAM.
+  ENDIF.
+ENDMODULE.
+
+*----------------------------------------------------------------------*
+* Subroutines (Core Game Mechanics Logic)
+*----------------------------------------------------------------------*
+
+FORM initialize_boards.
+  DATA: ls_cell TYPE ty_cell.
+  CLEAR: gt_display_board, gt_logic_board, gv_game_over.
+  DO gv_dim TIMES.
+    ls_cell-row_id = sy-index.
+    ls_cell-c1 = '@7X@'. ls_cell-c2 = '@7X@'. ls_cell-c3 = '@7X@'. ls_cell-c4 = '@7X@'.
+    ls_cell-c5 = '@7X@'. ls_cell-c6 = '@7X@'. ls_cell-c7 = '@7X@'. ls_cell-c8 = '@7X@'.
+    APPEND ls_cell TO gt_display_board.
+    
+    CLEAR: ls_cell-c1, ls_cell-c2, ls_cell-c3, ls_cell-c4, 
+           ls_cell-c5, ls_cell-c6, ls_cell-c7, ls_cell-c8.
+    APPEND ls_cell TO gt_logic_board.
+  ENDDO.
+ENDFORM.
+
+FORM place_random_mines.
+  DATA: lv_rand_row TYPE i, lv_rand_col TYPE i,
+        lv_placed   TYPE i VALUE 0,
+        lo_rand     TYPE REF TO cl_abap_random_int.
+  FIELD-SYMBOLS: <ls_row> TYPE ty_cell,
+                 <lv_field> TYPE any.
+
+  lo_rand = cl_abap_random_int=>create( seed = cl_abap_random=>seed( ) min = 1 max = gv_dim ).
+
+  WHILE lv_placed < gv_mines_count.
+    lv_rand_row = lo_rand->get_next( ).
+    lv_rand_col = lo_rand->get_next( ).
+
+    READ TABLE gt_logic_board ASSIGNING <ls_row> INDEX lv_rand_row.
+    IF sy-subrc = 0.
+      DATA(lv_comp_idx) = lv_rand_col + 1.
+      ASSIGN COMPONENT lv_comp_idx OF STRUCTURE <ls_row> TO <lv_field>.
+      IF <lv_field> IS ASSIGNED AND <lv_field> <> 'M'.
+        <lv_field> = 'M'. 
+        lv_placed = lv_placed + 1.
+      ENDIF.
+    ENDIF.
+  ENDWHILE.
+ENDFORM.
+
+FORM calculate_numbers.
+  DATA: lv_r TYPE i, lv_c TYPE i,
+        lv_dr TYPE i, lv_dc TYPE i,
+        lv_val TYPE string, lv_n_val TYPE string,
+        lv_mines_found TYPE i,
+        lv_idx_r TYPE i, lv_idx_c TYPE i.
+
+  DO gv_dim TIMES.
+    lv_r = sy-index.
+    DO gv_dim TIMES.
+      lv_c = sy-index.
+      
+      PERFORM get_cell_value USING lv_r lv_c CHANGING lv_val.
+      IF lv_val = 'M'. CONTINUE. ENDIF.
+
+      CLEAR lv_mines_found.
+      DO 3 TIMES.
+        lv_idx_r = sy-index.
+        lv_dr = lv_r + ( lv_idx_r - 2 ).
+        DO 3 TIMES.
+          lv_idx_c = sy-index.
+          lv_dc = lv_c + ( lv_idx_c - 2 ).
+          PERFORM get_cell_value USING lv_dr lv_dc CHANGING lv_n_val.
+          IF lv_n_val = 'M'. lv_mines_found = lv_mines_found + 1. ENDIF.
+        ENDDO. " Corrected ENDDO sequence targeting nested arrays
+      ENDDO.
+
+      IF lv_mines_found > 0.
+        PERFORM set_cell_value USING lv_r lv_c lv_mines_found.
+      ENDIF.
+    ENDDO.
+  ENDDO.
+ENDFORM.
+
+FORM get_cell_value USING pv_r TYPE i pv_c TYPE i CHANGING pv_val TYPE string.
+  FIELD-SYMBOLS: <ls_row> TYPE ty_cell, <lv_f> TYPE any.
+  CLEAR pv_val.
+  IF pv_r < 1 OR pv_r > gv_dim OR pv_c < 1 OR pv_c > gv_dim. RETURN. ENDIF.
+  READ TABLE gt_logic_board ASSIGNING <ls_row> INDEX pv_r.
+  IF sy-subrc = 0.
+    DATA(lv_comp) = pv_c + 1.
+    ASSIGN COMPONENT lv_comp OF STRUCTURE <ls_row> TO <lv_f>.
+    IF sy-subrc = 0. pv_val = <lv_f>. ENDIF.
+  ENDIF.
+ENDFORM.
+
+FORM set_cell_value USING pv_r TYPE i pv_c TYPE i pv_val TYPE any.
+  FIELD-SYMBOLS: <ls_row> TYPE ty_cell, <lv_f> TYPE any.
+  READ TABLE gt_logic_board ASSIGNING <ls_row> INDEX pv_r.
+  IF sy-subrc = 0.
+    DATA(lv_comp) = pv_c + 1.
+    ASSIGN COMPONENT lv_comp OF STRUCTURE <ls_row> TO <lv_f>.
+    IF sy-subrc = 0. <lv_f> = pv_val. ENDIF.
+  ENDIF.
+ENDFORM.
+
+FORM build_field_catalog.
+  DATA: ls_fcat TYPE lvc_s_fcat.
+  DO gv_dim TIMES.
+    CLEAR ls_fcat.
+    ls_fcat-fieldname = |C{ sy-index }|.
+    ls_fcat-ref_table = 'GT_DISPLAY_BOARD'.
+    ls_fcat-hotspot   = 'X'. 
+    APPEND ls_fcat TO gt_fieldcat.
+  ENDDO.
+ENDFORM.
+
+FORM reveal_cell USING pv_r TYPE i pv_c TYPE i.
+  DATA: lv_logic_val TYPE string,
+        lv_dr TYPE i, lv_dc TYPE i,
+        lv_idx_r TYPE i, lv_idx_c TYPE i.
+  FIELD-SYMBOLS: <ls_disp> TYPE ty_cell, <lv_d_val> TYPE any.
+
+  IF pv_r < 1 OR pv_r > gv_dim OR pv_c < 1 OR pv_c > gv_dim. RETURN. ENDIF.
+
+  READ TABLE gt_display_board ASSIGNING <ls_disp> INDEX pv_r.
+  DATA(lv_comp) = pv_c + 1.
+  ASSIGN COMPONENT lv_comp OF STRUCTURE <ls_disp> TO <lv_d_val>.
+  IF <lv_d_val> <> '@7X@'. RETURN. ENDIF. 
+
+  PERFORM get_cell_value USING pv_r pv_c CHANGING lv_logic_val.
+
+  IF lv_logic_val IS INITIAL.
+    <lv_d_val> = ' '. 
+    
+    DO 3 TIMES.
+      lv_idx_r = sy-index.
+      lv_dr = pv_r + ( lv_idx_r - 2 ).
+      DO 3 TIMES.
+        lv_idx_c = sy-index.
+        lv_dc = pv_c + ( lv_idx_c - 2 ).
+        PERFORM reveal_cell USING lv_dr lv_dc.
+      ENDDO.
+    ENDDO.
+  ELSE.
+    <lv_d_val> = lv_logic_val. 
+  ENDIF.
+ENDFORM.
+
+*----------------------------------------------------------------------*
+* Interactive Grid Click Interception Implementation
+*----------------------------------------------------------------------*
+CLASS lcl_event_handler IMPLEMENTATION.
+  METHOD handle_hotspot_click.
+    DATA: lv_row TYPE i, lv_col TYPE i, lv_hit TYPE string,
+          lv_r_idx TYPE i, lv_c_idx TYPE i, lv_m_check TYPE string,
+          lv_closed_count TYPE i.
+    FIELD-SYMBOLS: <ls_d_row> TYPE ty_cell, <lv_f> TYPE any, <lv_c> TYPE any.
+
+    IF gv_game_over = 'X'. RETURN. ENDIF.
+
+    lv_row = e_row_id-row_id.
+    lv_col = substring( val = e_column_id-fieldname off = 1 ).
+
+    PERFORM get_cell_value USING lv_row lv_col CHANGING lv_hit.
+
+    IF lv_hit = 'M'.
+      gv_game_over = 'X'.
+      LOOP AT gt_display_board ASSIGNING <ls_d_row>.
+        lv_r_idx = sy-tabix.
+        DO gv_dim TIMES.
+          lv_c_idx = sy-index.
+          PERFORM get_cell_value USING lv_r_idx lv_c_idx CHANGING lv_m_check.
+          IF lv_m_check = 'M'.
+            DATA(lv_comp_m) = lv_c_idx + 1.
+            ASSIGN COMPONENT lv_comp_m OF STRUCTURE <ls_d_row> TO <lv_f>.
+            <lv_f> = '@0A@'. 
+          ENDIF.
+        DO END.
+      ENDLOOP.
+      CALL METHOD go_grid->refresh_table_display.
+      MESSAGE 'Boom! Game Over. You hit a mine.' TYPE 'I' DISPLAY LIKE 'E'.
+    ELSE.
+      PERFORM reveal_cell USING lv_row lv_col.
+      CALL METHOD go_grid->refresh_table_display.
+      
+      CLEAR lv_closed_count.
+      LOOP AT gt_display_board ASSIGNING <ls_d_row>.
+        DO gv_dim TIMES.
+          DATA(lv_comp_c) = sy-index + 1.
+          ASSIGN COMPONENT lv_comp_c OF STRUCTURE <ls_d_row> TO <lv_c>.
+          IF <lv_c> = '@7X@'. lv_closed_count = lv_closed_count + 1. ENDIF.
+        DO END.
+      ENDLOOP.
+
+      IF lv_closed_count = gv_mines_count.
+        gv_game_over = 'X'.
+        MESSAGE 'Congratulations! You safely cleared the minefield!' TYPE 'I'.
+      ENDIF.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
